@@ -25,6 +25,7 @@ import org.apache.log4j.Logger;
 import org.dspace.services.ConfigurationService;
 import org.dspace.utils.DSpace;
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 //Results of first page
@@ -41,11 +42,15 @@ public class OpenAIREProjectService {
 	public static final String PROJECT_CODE="code";
 
 	public static final String PROJECT_FUNDING_PROGRAM = "fundingProgram";
+	
+	public static final String PROJECT_OPENAIRE_ID = "openaireid";
 
 	public static final String PROJECT_TITLE = "title";
 
 	public static final String QUERY_FIELD_ID = "grantID";
-	public static final String QUERY_FIELD_NAME = "name";
+	public static final String QUERY_FIELD_NAME = "keywords";
+	
+	public static final String OPENAIRE_INFO_PREFIX = "info:eu-repo/grantAgreement/";
 
 	public List<OpenAireProject> getProjects(String field, String text, int start, int max) {
 		if (client == null) {
@@ -66,6 +71,9 @@ public class OpenAIREProjectService {
 			URIBuilder builder = new URIBuilder(OPENAIRE_SEARCH_PROJECT_ENDPOINT);
 			builder.setParameter(field, text);
 			builder.setParameter("format", "json");
+			builder.setParameter("size", String.valueOf(max));
+			builder.setParameter("page", String.valueOf((int) (start / max)) +1);
+			int offset = start % max;
 			URI uri = builder.build();
 			GetMethod method = null;
 			method = new GetMethod(uri.toASCIIString());
@@ -81,11 +89,10 @@ public class OpenAIREProjectService {
 			JSONObject obj = new JSONObject(responseBody);
 			Integer total = (Integer) obj.getJSONObject("response").getJSONObject("header").getJSONObject("total").get("$");
 			JSONObject results = obj.getJSONObject("response").getJSONObject("results");
-			JSONArray resultArray = results.getJSONArray("result");
+			JSONArray resultArray = results != null?results.getJSONArray("result"):new JSONArray();
 			 
 			max =  total.intValue() < max? total.intValue(): max;
-			for (int x = 0; x < max; x++) {
-				System.out.println(x);
+			for (int x = offset; x < resultArray.length(); x++) {
 				String funder = null;
 				String funding = null;
 				String code = null;
@@ -148,7 +155,11 @@ public class OpenAIREProjectService {
 				result.add(pj);
 			}
 
-		} catch (URISyntaxException | IOException e) {
+		} catch (URISyntaxException e ) {
+			log.error(e.getMessage(), e);
+		}catch ( IOException e) {
+			log.error(e.getMessage(), e);
+		}catch (JSONException e) {
 			log.error(e.getMessage(), e);
 		}
 		return result;

@@ -253,6 +253,7 @@ public abstract class ASolrConfigurerComponent<T extends DSpaceObject, IBC exten
                 "appliedFilterQueries"
                         + getRelationConfiguration().getRelationName(),
                 appliedFilterQueries);
+        request.setAttribute("count" + this.getShortName(), docsNumFound);
     }
 
 	private String getOrderField(int sortBy) throws SortException {
@@ -313,9 +314,15 @@ public abstract class ASolrConfigurerComponent<T extends DSpaceObject, IBC exten
         String uuid = cris.getUuid();
         String query = MessageFormat.format(getRelationConfiguration()
                 .getQuery(), authority, uuid);
+        
         List<String> filters = getFilters(type);
 
         DiscoverQuery discoveryQuery = new DiscoverQuery();
+        if(getCommonFilter()!=null) {            
+            String format = MessageFormat.format(getCommonFilter(), getRelationConfiguration().getRelationName(),
+                    cris.getUuid(), authority);
+            discoveryQuery.addFilterQueries(format);
+        }
         try
         {
             discoveryQuery.addFilterQueries("NOT(withdrawn:true)",

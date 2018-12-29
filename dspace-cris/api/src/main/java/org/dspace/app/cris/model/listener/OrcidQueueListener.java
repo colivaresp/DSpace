@@ -14,28 +14,31 @@ import javax.persistence.Transient;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.log4j.Logger;
+import org.dspace.app.cris.discovery.NativeNestedListenerSolrIndexer;
 import org.dspace.app.cris.model.ACrisObject;
 import org.dspace.app.cris.model.CrisConstants;
 import org.dspace.app.cris.model.Project;
 import org.dspace.app.cris.model.RelationPreference;
 import org.dspace.app.cris.model.ResearcherPage;
+import org.dspace.app.cris.model.jdyna.ACrisNestedObject;
 import org.dspace.app.cris.model.jdyna.ProjectProperty;
+import org.dspace.app.cris.model.jdyna.RPNestedObject;
 import org.dspace.app.cris.model.jdyna.RPPropertiesDefinition;
 import org.dspace.app.cris.model.jdyna.RPProperty;
 import org.dspace.app.cris.model.jdyna.value.RPPointer;
 import org.dspace.app.cris.model.orcid.OrcidPreferencesUtils;
 import org.dspace.content.Item;
-import org.dspace.core.Constants;
 import org.dspace.core.Context;
 import org.hibernate.event.spi.PostLoadEvent;
 import org.hibernate.event.spi.PostLoadEventListener;
 
+import it.cilea.osd.common.listener.NativePostDeleteEventListener;
 import it.cilea.osd.common.listener.NativePostUpdateEventListener;
 import it.cilea.osd.common.model.Identifiable;
 import it.cilea.osd.jdyna.value.BooleanValue;
 
 public class OrcidQueueListener
-        implements NativePostUpdateEventListener, PostLoadEventListener
+        implements NativePostUpdateEventListener, NativePostDeleteEventListener, PostLoadEventListener 
 {
 
     private static final String PREFIX_ORCID_PROFILE_PREF = OrcidPreferencesUtils.PREFIX_ORCID_PROFILE_PREF;
@@ -56,7 +59,7 @@ public class OrcidQueueListener
     @Override
 	public <T extends Identifiable> void onPostUpdate(T entity) {		
 		Object object = entity;
-		if (!(object instanceof ACrisObject) && !(object instanceof RelationPreference)) {
+		if (!(object instanceof ACrisObject) && !(object instanceof RelationPreference) && !(object instanceof ACrisNestedObject)) {
 			// nothing to do
 			return;
 		}
@@ -64,7 +67,14 @@ public class OrcidQueueListener
 		log.debug("Call onPostUpdate " + OrcidQueueListener.class);
 		
 		try {
-			if (object instanceof ACrisObject) {
+		    if (object instanceof ACrisNestedObject) {
+		        ACrisNestedObject crisNestedObject = (ACrisNestedObject)object;
+		        
+		        if(crisNestedObject instanceof RPNestedObject) {
+		            orcidPreferencesUtils.prepareOrcidQueueByNested(crisNestedObject);
+		        }		        
+		    }
+		    else if (object instanceof ACrisObject) {
 				ACrisObject crisObj = (ACrisObject) object;
 				if (crisObj.getType() == CrisConstants.RP_TYPE_ID
 						|| crisObj.getType() == CrisConstants.PROJECT_TYPE_ID) {
@@ -245,59 +255,84 @@ public class OrcidQueueListener
     {
 
         Object object = event.getEntity();
-        if (object instanceof ResearcherPage)
+        if (object instanceof ACrisObject)
         {
-            log.debug("Call onPostLoad " + OrcidQueueListener.class);
-
-            ResearcherPage rp = (ResearcherPage) object;
-
-            List<RPProperty> propsPublications = rp.getAnagrafica4view()
-                    .get(ORCID_PUBLICATIONS_PREFS);
-            List<RPProperty> propsProjects = rp.getAnagrafica4view()
-                    .get(ORCID_PROJECTS_PREFS);
-
-            for (RPProperty prop : propsPublications)
+            ACrisObject crisObj = (ACrisObject) object;
+            if (crisObj.getType() == CrisConstants.RP_TYPE_ID)
             {
-                rp.setOldOrcidPublicationsPreference(prop.toString());
-            }
-            for (RPProperty prop : propsProjects)
-            {
-                rp.setOldOrcidProjectsPreference(prop.toString());
-            }
+                log.debug("Call onPostLoad " + OrcidQueueListener.class);
 
-            List<RPPropertiesDefinition> metadataDefinitions = orcidPreferencesUtils
-                    .getApplicationService()
-                    .likePropertiesDefinitionsByShortName(
-                            RPPropertiesDefinition.class,
-                            PREFIX_ORCID_PROFILE_PREF);
-            for (RPPropertiesDefinition rppd : metadataDefinitions)
-            {
-                String metadataShortnameINTERNAL = rppd.getShortName()
-                        .replaceFirst(PREFIX_ORCID_PROFILE_PREF, "");
-                List<RPProperty> propsRps = rp.getAnagrafica4view()
-                        .get(rppd.getShortName());
-                for (RPProperty prop : propsRps)
+                ResearcherPage rp = (ResearcherPage) crisObj;
+
+                List<RPProperty> propsPublications = rp.getAnagrafica4view()
+                        .get(ORCID_PUBLICATIONS_PREFS);
+                List<RPProperty> propsProjects = rp.getAnagrafica4view()
+                        .get(ORCID_PROJECTS_PREFS);
+
+                for (RPProperty prop : propsPublications)
                 {
-                    BooleanValue booleanValue = (BooleanValue) (prop
-                            .getValue());
-                    if (booleanValue.getObject())
+                    rp.setOldOrcidPublicationsPreference(prop.toString());
+                }
+                for (RPProperty prop : propsProjects)
+                {
+                    rp.setOldOrcidProjectsPreference(prop.toString());
+                }
+
+                List<RPPropertiesDefinition> metadataDefinitions = orcidPreferencesUtils
+                        .getApplicationService()
+                        .likePropertiesDefinitionsByShortName(
+                                RPPropertiesDefinition.class,
+                                PREFIX_ORCID_PROFILE_PREF);
+                for (RPPropertiesDefinition rppd : metadataDefinitions)
+                {
+                    String metadataShortnameINTERNAL = rppd.getShortName()
+                            .replaceFirst(PREFIX_ORCID_PROFILE_PREF, "");
+                    List<RPProperty> propsRps = rp.getAnagrafica4view()
+                            .get(rppd.getShortName());
+                    for (RPProperty prop : propsRps)
                     {
-                        rp.getOldOrcidProfilePreference()
-                                .add(metadataShortnameINTERNAL);
-                        List<String> listProps = new ArrayList<String>();
-                        for (RPProperty props : rp.getAnagrafica4view()
-                                .get(metadataShortnameINTERNAL))
+                        BooleanValue booleanValue = (BooleanValue) (prop
+                                .getValue());
+                        if (booleanValue.getObject())
                         {
-                            // manage only first value
-                            listProps.add(props.toString());
+                            rp.getOldOrcidProfilePreference()
+                                    .add(metadataShortnameINTERNAL);
+                            List<String> listProps = new ArrayList<String>();
+                            for (RPProperty props : rp.getAnagrafica4view()
+                                    .get(metadataShortnameINTERNAL))
+                            {
+                                // manage only first value
+                                listProps.add(props.toString());
+                            }
+                            rp.getOldMapOrcidProfilePreference()
+                                    .put(metadataShortnameINTERNAL, listProps);
                         }
-                        rp.getOldMapOrcidProfilePreference()
-                                .put(metadataShortnameINTERNAL, listProps);
                     }
                 }
+                log.debug("End onPostLoad " + OrcidQueueListener.class);
             }
-            log.debug("End onPostLoad " + OrcidQueueListener.class);
         }
+    }
+
+    @Override
+    public <T> void onPostDelete(T entity)
+    {
+        
+        Object object = entity;
+        if (!(object instanceof ACrisNestedObject))
+        {
+            // nothing to do
+            return;
+        }
+
+        log.debug("Call onPostDelete " + OrcidQueueListener.class);
+        
+        ACrisNestedObject crisNestedObject = (ACrisNestedObject) object;
+
+        if(crisNestedObject instanceof RPNestedObject) {
+            orcidPreferencesUtils.prepareOrcidQueueByNested(crisNestedObject);
+        }
+
     }
 
 }

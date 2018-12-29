@@ -176,7 +176,7 @@ public class WorkflowManager
         DatabaseManager.insert(c, row);
 
         WorkflowItem wfi = new WorkflowItem(c, row);
-
+        logWorkflowEvent(c, myitem, wfi, myitem.getSubmitter(), WorkflowManager.WFSTATE_SUBMIT, myitem.getSubmitter(), collection, WorkflowManager.WFSTATE_SUBMIT, null);
         wfi.setMultipleFiles(wsi.hasMultipleFiles());
         wfi.setMultipleTitles(wsi.hasMultipleTitles());
         wfi.setPublishedBefore(wsi.isPublishedBefore());
@@ -412,7 +412,7 @@ public class WorkflowManager
             // advance(...) will call itself if no workflow step group exists
             // so we need to check permissions only if a workflow step group is
             // in place.
-            if (wi.getCollection().getWorkflowGroup(1) != null)
+            if (wi.getCollection().getWorkflowGroup(1) != null && !wi.getCollection().getWorkflowGroup(1).isEmpty())
             {
                 // FIXME note:  authorizeAction ASSUMES that c.getCurrentUser() == e!
                 AuthorizeManager.authorizeAction(c, wi.getCollection(), Constants.WORKFLOW_STEP_1, true);
@@ -431,7 +431,7 @@ public class WorkflowManager
             // advance(...) will call itself if no workflow step group exists
             // so we need to check permissions only if a workflow step group is
             // in place.
-            if (wi.getCollection().getWorkflowGroup(2) != null)
+            if (wi.getCollection().getWorkflowGroup(2) != null && !wi.getCollection().getWorkflowGroup(2).isEmpty())
             {
                 AuthorizeManager.authorizeAction(c, wi.getCollection(), Constants.WORKFLOW_STEP_2, true);
             }
@@ -449,7 +449,7 @@ public class WorkflowManager
             // advance(...) will call itself if no workflow step group exists
             // so we need to check permissions only if a workflow step group is
             // in place.
-            if (wi.getCollection().getWorkflowGroup(3) != null)
+            if (wi.getCollection().getWorkflowGroup(3) != null && !wi.getCollection().getWorkflowGroup(3).isEmpty())
             {
                 AuthorizeManager.authorizeAction(c, wi.getCollection(), Constants.WORKFLOW_STEP_3, true);
             }
@@ -716,8 +716,6 @@ public class WorkflowManager
         workflowItem.setState(newState);
         workflowItem.setOwner(newowner);
 
-        logWorkflowEvent(context, workflowItem.getItem(), workflowItem,
-                context.getCurrentUser(), newState, newowner, collection, oldState, null);
     }
 
     /**
@@ -1065,8 +1063,6 @@ public class WorkflowManager
                 + "collection_id=" + wi.getCollection().getID() + "eperson_id="
                 + e.getID()));
 
-        logWorkflowEvent(c, wsi.getItem(), wi, e, WFSTATE_SUBMIT, null, wsi.getCollection(), oldState, null);
-
         return wsi;
     }
 
@@ -1341,6 +1337,9 @@ public class WorkflowManager
 
         // Add to item as a DC field
         item.addDC("description", "provenance", "en", provDescription);
+
+        logWorkflowEvent(c, wi.getItem(), wi,
+                c.getCurrentUser(), wi.getState(), c.getCurrentUser(), wi.getCollection(), wi.getState(), null);
         item.update();
     }
 

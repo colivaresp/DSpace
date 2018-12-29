@@ -45,14 +45,12 @@ import org.dspace.app.cris.model.orcid.OrcidHistory;
 import org.dspace.app.cris.model.orcid.OrcidQueue;
 import org.dspace.app.cris.model.ws.User;
 import org.dspace.app.cris.util.ResearcherPageUtils;
+import org.dspace.app.util.Util;
 import org.dspace.core.ConfigurationManager;
-import org.dspace.core.Context;
-import org.dspace.discovery.SearchServiceException;
 import org.dspace.services.ConfigurationService;
 import org.dspace.storage.rdbms.DatabaseUtils;
 import org.hibernate.Session;
 
-import it.cilea.osd.common.core.SingleTimeStampInfo;
 import it.cilea.osd.common.model.Identifiable;
 import jxl.read.biff.BiffException;
 import net.sf.ehcache.Cache;
@@ -583,7 +581,7 @@ public class ApplicationService extends ExtendedTabService
 			Element element = cacheRpByEPerson.getQuiet(id);
 			if (element != null) {
 				ResearcherPage rp = (ResearcherPage) element.getValue();
-				if (!isExpiredCache(ResearcherPage.class, element, id, rp)) {
+				if (!isExpiredCache(ResearcherPage.class, element, rp.getId(), rp)) {
 					return rp;
 				}
 				else if (rp != null) {
@@ -831,14 +829,13 @@ public class ApplicationService extends ExtendedTabService
 		Date now = new Date();
 		if (rp == null) {
 			return true;
-		}
-		SingleTimeStampInfo timestampLastModified = rp.getTimeStampInfo().getTimestampLastModified();
-		long lastModCache = timestampLastModified != null?timestampLastModified.getTimestamp().getTime():-1;
+		}		
+		long lastModCache = element.getLastUpdateTime();
 		
 		if ( now.getTime() - element.getLastAccessTime() > 1000) {
 			Date uniqueLastModifiedTimeStamp = uniqueLastModifiedTimeStamp(model, objectId);
-			long lastModDb = uniqueLastModifiedTimeStamp != null? uniqueLastModifiedTimeStamp.getTime():-1;
-			if (lastModCache == lastModDb) {
+			long lastModDb = uniqueLastModifiedTimeStamp != null? uniqueLastModifiedTimeStamp.getTime():Long.MAX_VALUE;
+			if (lastModCache >= lastModDb) {
 				element.updateAccessStatistics();
 				return false;
 			}
@@ -846,7 +843,6 @@ public class ApplicationService extends ExtendedTabService
 				return true;
 			}
 		}
-		element.updateAccessStatistics();
 		return false;
 	}
 
@@ -1055,8 +1051,10 @@ public class ApplicationService extends ExtendedTabService
 			if (DatabaseUtils.getRebuildCrisConfiguration()) {
 				try {
 					log.info("Post database migration, rebuild cris configuration");
+					String sourceVersion = Util.getSourceVersion();
+                    log.info("DSpace version: " + sourceVersion);
 					String file = ConfigurationManager.getProperty("dspace.dir") + File.separator + "etc"
-							+ File.separator + "configuration-tool-demo.xls";
+					        + File.separator + "upgrade" + File.separator + sourceVersion+"__DSpaceCRIS-Upgrade.xls";
 					String[] args = new String[] { "-f", file };
 					ImportCRISDataModelConfiguration.main(args);
 					log.info("Rebuild CRIS Configuration is complete");

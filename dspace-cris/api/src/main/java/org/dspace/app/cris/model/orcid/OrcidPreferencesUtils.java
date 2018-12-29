@@ -8,16 +8,20 @@
 package org.dspace.app.cris.model.orcid;
 
 import java.util.ArrayList;
-import java.util.Date;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.persistence.Transient;
 
+import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.log4j.Logger;
+import org.apache.oltu.oauth2.common.utils.OAuthUtils;
 import org.apache.solr.client.solrj.SolrQuery;
 import org.apache.solr.client.solrj.response.QueryResponse;
 import org.apache.solr.common.SolrDocument;
@@ -30,6 +34,7 @@ import org.dspace.app.cris.model.Project;
 import org.dspace.app.cris.model.RelationPreference;
 import org.dspace.app.cris.model.ResearcherPage;
 import org.dspace.app.cris.model.VisibilityConstants;
+import org.dspace.app.cris.model.jdyna.ACrisNestedObject;
 import org.dspace.app.cris.model.jdyna.RPPropertiesDefinition;
 import org.dspace.app.cris.model.jdyna.RPProperty;
 import org.dspace.app.cris.service.ApplicationService;
@@ -43,31 +48,37 @@ import org.dspace.authority.orcid.jaxb.common.ExternalId;
 import org.dspace.authority.orcid.jaxb.common.Visibility;
 import org.dspace.authority.orcid.jaxb.email.EmailCtype;
 import org.dspace.authority.orcid.jaxb.email.Emails;
-import org.dspace.authority.orcid.jaxb.keyword.Keyword;
 import org.dspace.authority.orcid.jaxb.keyword.KeywordCtype;
 import org.dspace.authority.orcid.jaxb.keyword.Keywords;
 import org.dspace.authority.orcid.jaxb.othername.OtherNameCtype;
 import org.dspace.authority.orcid.jaxb.othername.OtherNames;
 import org.dspace.authority.orcid.jaxb.person.Person;
-import org.dspace.authority.orcid.jaxb.person.externalidentifier.ExternalIdentifier;
 import org.dspace.authority.orcid.jaxb.person.externalidentifier.ExternalIdentifiers;
 import org.dspace.authority.orcid.jaxb.personaldetails.BiographyCtype;
 import org.dspace.authority.orcid.jaxb.personaldetails.NameCtype.CreditName;
-import org.dspace.authority.orcid.jaxb.researcherurl.ResearcherUrl;
+import org.dspace.authority.orcid.jaxb.personaldetails.NameCtype.FamilyName;
+import org.dspace.authority.orcid.jaxb.personaldetails.NameCtype.GivenNames;
 import org.dspace.authority.orcid.jaxb.researcherurl.ResearcherUrlCtype;
 import org.dspace.authority.orcid.jaxb.researcherurl.ResearcherUrls;
 import org.dspace.content.DSpaceObject;
 import org.dspace.content.Item;
+import org.dspace.core.ConfigurationManager;
 import org.dspace.core.Constants;
-import org.dspace.core.Context;
 import org.dspace.discovery.SearchServiceException;
 import org.dspace.utils.DSpace;
 
-import it.cilea.osd.common.core.SingleTimeStampInfo;
 import it.cilea.osd.jdyna.value.BooleanValue;
 
 public class OrcidPreferencesUtils
 {
+	private static ThreadLocal<Set<String>> importedORCIDs = new ThreadLocal<Set<String>>() {
+		@Override protected Set<String> initialValue() {
+            return new HashSet<String>();
+		}
+	};
+	
+	public static final String RPPDEF_ORCID_WEBHOOK = "orcid-webhook";
+	
     public static final String[] ORCID_RESEARCHER_ATTRIBUTES = new String[] {
             "primary-email", "name", "other-names", "other-emails",
             "iso-3166-country", "keywords", "biography", "credit-name" };
@@ -107,6 +118,9 @@ public class OrcidPreferencesUtils
 
     public void prepareOrcidQueue(String crisId, DSpaceObject obj)
     {
+		if (obj instanceof ResearcherPage && hasBeenImportedInThisThread((ResearcherPage) obj)) {
+			return;
+		}
         OrcidQueue orcidQueue = getApplicationService()
                 .uniqueOrcidQueueByEntityIdAndTypeIdAndOwnerId(obj.getID(),
                         obj.getType(), crisId);
@@ -124,19 +138,22 @@ public class OrcidPreferencesUtils
 
     public boolean isProfileSelectedToShare(ResearcherPage researcher)
     {
+        //if the profile have already acquired authorization scope
         if (isTokenReleasedForSync(researcher,
                 OrcidService.SYSTEM_ORCID_TOKEN_PROFILE_CREATE_SCOPE))
         {
 
+            //prepare the old value
             Map<String, List<String>> oldMapOrcidProfilePreference = researcher
                     .getOldMapOrcidProfilePreference();
 
-            // if metadata set to go on Orcid Registry have modifications return
-            // true
+            //retrieve all metadata that match Orcid Registry metadata 
             List<RPPropertiesDefinition> metadataDefinitions = getApplicationService()
                     .likePropertiesDefinitionsByShortName(
                             RPPropertiesDefinition.class,
                             PREFIX_ORCID_PROFILE_PREF);
+            
+            // if metadata is enable to go on Orcid Registry 
             for (RPPropertiesDefinition rppd : metadataDefinitions)
             {
                 String metadataShortnameINTERNAL = rppd.getShortName()
@@ -145,20 +162,24 @@ public class OrcidPreferencesUtils
                 List<RPProperty> propsRps = researcher.getAnagrafica4view()
                         .get(rppd.getShortName());
 
+                boolean preference = false;
                 for (RPProperty prop : propsRps)
                 {
                     BooleanValue booleanValue = (BooleanValue) (prop
                             .getValue());
                     if (booleanValue.getObject())
                     {
+                        // if there is a new metadata enabled on the user preferences
                         if (!researcher.getOldOrcidProfilePreference()
                                 .contains(metadataShortnameINTERNAL))
                         {
                             return true;
                         }
+                        preference = true;
                     }
                 }
 
+                // get old values
                 List<String> rpPropValues = new ArrayList<String>();
                 if (oldMapOrcidProfilePreference
                         .containsKey(metadataShortnameINTERNAL))
@@ -167,21 +188,26 @@ public class OrcidPreferencesUtils
                             .get(metadataShortnameINTERNAL);
                 }
 
+                // get current values
                 List<RPProperty> propsFoundedRps = researcher
                         .getAnagrafica4view().get(metadataShortnameINTERNAL);
-                boolean founded = false;
-                for (String rpPropValue : rpPropValues)
+                List<String> listProps = new ArrayList<String>();
+                for (RPProperty props : propsFoundedRps)
                 {
-                    for (RPProperty propFoundedRp : propsFoundedRps)
-                    {
-                        if (rpPropValue.equals(propFoundedRp.toString()))
-                        {
-                            founded = true;
-                        }
-                    }
+                    // manage only first value
+                    listProps.add(props.toString());
                 }
-                if (!founded && propsFoundedRps != null
-                        && !propsFoundedRps.isEmpty())
+                
+                // diff current vs old
+                boolean founded = false;
+                
+                Collections.sort(listProps);
+                Collections.sort(rpPropValues);
+                founded = CollectionUtils.isEqualCollection(listProps, rpPropValues);
+               
+                //if there are changes return true
+                if (preference && !founded && (propsFoundedRps != null
+                        && !propsFoundedRps.isEmpty()))
                 {
                     return true;
                 }
@@ -769,10 +795,32 @@ public class OrcidPreferencesUtils
     }
 
     public static boolean populateRP(ResearcherPage crisObject, String ORCID,
-            String token)
+            String token) {
+    	return populateRP(crisObject, ORCID, token, null, null);
+    }
+
+	/**
+	 * By default only properties not yet filled in the RP will be populated from
+	 * ORCID. The propsToSkip list can be used to skip the import of some specific
+	 * information, the propsToReplace will force the system to replace the current
+	 * values with the ones received from ORCID (including empty values). Both lists
+	 * must contains the shortName of the properties on the DSpace-CRIS side (i.e.
+	 * fullName not name)
+	 * 
+	 * @param crisObject
+	 * @param ORCID
+	 * @param token
+	 * @param propToSkip
+	 * @param propToAppend
+	 * @param propsToReplace
+	 * @return
+	 */
+    public static boolean populateRP(ResearcherPage crisObject, String ORCID,
+            String token, List<String> propsToSkip, List<String> propsToReplace)
     {
         if (OrcidService.isValid(ORCID))
         {
+        	importedORCIDs.get().add(crisObject.getCrisID());
             ApplicationService applicationService = new Researcher()
                     .getApplicationService();
             List<RPPropertiesDefinition> metadataDefinitions = applicationService
@@ -784,28 +832,31 @@ public class OrcidPreferencesUtils
                             RPPropertiesDefinition.class,
                             OrcidPreferencesUtils.PREFIX_ORCID_SYSTEMPROFILE_PREF));
             Map<String, String> mapMetadata = new HashMap<String, String>();
+            // special case for the Family and GiveName stored separately in ORCID
+            mapMetadata.put("$fullname", "fullName");
             for (RPPropertiesDefinition rppd : metadataDefinitions)
             {
+            	String metadataShortnameORCID = rppd.getLabel();
+            	String metadataShortnameINTERNAL;
                 if (rppd.getShortName().startsWith(
                         OrcidPreferencesUtils.PREFIX_ORCID_PROFILE_PREF))
                 {
-                    String metadataShortnameINTERNAL = rppd.getShortName()
+                    metadataShortnameINTERNAL = rppd.getShortName()
                             .replaceFirst(
                                     OrcidPreferencesUtils.PREFIX_ORCID_PROFILE_PREF,
                                     "");
-                    String metadataShortnameORCID = rppd.getLabel();
-                    mapMetadata.put(metadataShortnameORCID,
-                            metadataShortnameINTERNAL);
                 }
                 else
                 {
-                    String metadataShortnameINTERNAL = rppd.getShortName()
+                    metadataShortnameINTERNAL = rppd.getShortName()
                             .replaceFirst(
                                     OrcidPreferencesUtils.PREFIX_ORCID_SYSTEMPROFILE_PREF,
                                     "");
-                    String metadataShortnameORCID = rppd.getLabel();
-                    mapMetadata.put(metadataShortnameORCID,
-                            metadataShortnameINTERNAL);
+                }
+                
+                if (propsToSkip == null || !propsToSkip.contains(metadataShortnameINTERNAL)) {
+	                mapMetadata.put(metadataShortnameORCID,
+	                        metadataShortnameINTERNAL);
                 }
             }
 
@@ -822,12 +873,14 @@ public class OrcidPreferencesUtils
             }
             if (orcidProfile != null)
             {
-                ResearcherPageUtils.buildTextValue(crisObject, ORCID, "orcid");
+            	if (StringUtils.isBlank(ResearcherPageUtils.getStringValue(crisObject, "orcid"))) {
+            		ResearcherPageUtils.buildTextValue(crisObject, ORCID, "orcid");
+            	}
 
                 if (mapMetadata.containsKey("biography"))
                 {
                     BiographyCtype biography = orcidProfile.getBiography();
-                    if (biography != null)
+                    if (biography != null && checkSyncAllowed(crisObject, mapMetadata.get("biography"), propsToReplace))
                     {
                         ResearcherPageUtils.buildTextValue(crisObject,
                                 biography.getContent(),
@@ -847,7 +900,7 @@ public class OrcidPreferencesUtils
                         {
                             if (email.isVerified())
                             {
-                                if (email.isPrimary())
+                                if (email.isPrimary() && checkSyncAllowed(crisObject, mapMetadata.get("primary-email"), propsToReplace))
                                 {
                                     ResearcherPageUtils.buildTextValue(
                                             crisObject, email.getEmail(),
@@ -858,23 +911,46 @@ public class OrcidPreferencesUtils
                                 }
                                 else
                                 {
-                                    ResearcherPageUtils.buildTextValue(
-                                            crisObject, email.getEmail(),
-                                            mapMetadata.get("other-emails"),
-                                            email.getVisibility() == Visibility.PUBLIC
-                                                    ? VisibilityConstants.PUBLIC
-                                                    : VisibilityConstants.HIDE);
+                                	if (checkSyncAllowed(crisObject, mapMetadata.get("other-emails"), propsToReplace)) {
+	                                    ResearcherPageUtils.buildTextValue(
+	                                            crisObject, email.getEmail(),
+	                                            mapMetadata.get("other-emails"),
+	                                            email.getVisibility() == Visibility.PUBLIC
+	                                                    ? VisibilityConstants.PUBLIC
+	                                                    : VisibilityConstants.HIDE);
+                                	}
                                 }
                             }
                         }
                     }
+                }
+                
+                // special case for the ORCID principal name stored as family + given
+                if (mapMetadata.containsKey("$fullname")) {
+                	FamilyName surname = orcidProfile.getName().getFamilyName();
+                	GivenNames firstname = orcidProfile.getName().getGivenNames();
+                	if (surname != null) {
+                		String fullname = surname.getValue();
+	                	if (firstname != null) {
+	                		fullname += ", " + firstname.getValue();
+	                	}
+	                	if (checkSyncAllowed(crisObject, mapMetadata.get("$fullname"), propsToReplace)) {
+	                		ResearcherPageUtils.buildTextValue(crisObject,
+	                                fullname,
+	                                mapMetadata.get("$fullname"),
+	                                orcidProfile.getName()
+	                                        .getVisibility() == Visibility.PUBLIC
+	                                                ? VisibilityConstants.PUBLIC
+	                                                : VisibilityConstants.HIDE);
+	                	}
+                	}
                 }
 
                 if (mapMetadata.containsKey("credit-name"))
                 {
                     CreditName creditName = orcidProfile.getName()
                             .getCreditName();
-                    if (creditName != null)
+                    if (creditName != null && checkSyncAllowed(crisObject, mapMetadata.get("credit-name"), propsToReplace))
                     {
                         ResearcherPageUtils.buildTextValue(crisObject,
                                 creditName.getValue(),
@@ -891,18 +967,31 @@ public class OrcidPreferencesUtils
                     OtherNames otherNames = orcidProfile.getOtherNames();
                     if (otherNames != null)
                     {
+                    	boolean found = false;
                         for (OtherNameCtype otherName : otherNames.getOtherName())
                         {
                             String value = otherName.getContent();
                             if (StringUtils.isNotBlank(value))
                             {
-                                ResearcherPageUtils.buildTextValue(crisObject,
-                                        value,
-                                        mapMetadata.get("other-names"),
-                                        otherName.getVisibility() == Visibility.PUBLIC
-                                                ? VisibilityConstants.PUBLIC
-                                                : VisibilityConstants.HIDE);
+                            	found = true;
+                            	break;
                             }
+                        }
+                        
+                        if (found && checkSyncAllowed(crisObject, mapMetadata.get("other-names"), propsToReplace)) {
+                        	for (OtherNameCtype otherName : otherNames.getOtherName())
+                            {
+                                String value = otherName.getContent();
+                                if (StringUtils.isNotBlank(value))
+                                {
+                                    ResearcherPageUtils.buildTextValue(crisObject,
+                                            value,
+                                            mapMetadata.get("other-names"),
+                                            otherName.getVisibility() == Visibility.PUBLIC
+                                                    ? VisibilityConstants.PUBLIC
+                                                    : VisibilityConstants.HIDE);
+                                }
+                            }	
                         }
                     }
                 }
@@ -912,17 +1001,31 @@ public class OrcidPreferencesUtils
                     Addresses addresses = orcidProfile.getAddresses();
                     if (addresses != null)
                     {
+                    	boolean found = false;
                         for (AddressCtype address : addresses.getAddress())
                         {
                             String country = address.getCountry();
                             if (StringUtils.isNotBlank(country))
                             {
-                                ResearcherPageUtils.buildTextValue(crisObject,
-                                        country,
-                                        mapMetadata.get("iso-3166-country"),
-                                        address.getVisibility() == Visibility.PUBLIC
-                                                ? VisibilityConstants.PUBLIC
-                                                : VisibilityConstants.HIDE);
+                            	found = true;
+                            	break;
+                            }
+                        }
+                        
+                        if (found && checkSyncAllowed(crisObject, mapMetadata.get("iso-3166-country"), propsToReplace)) {
+                        	for (AddressCtype address : addresses.getAddress())
+                            {
+                                String country = address.getCountry();
+                                if (StringUtils.isNotBlank(country))
+                                {
+                                	found = true;
+                                	ResearcherPageUtils.buildTextValue(crisObject,
+                                            country,
+                                            mapMetadata.get("iso-3166-country"),
+                                            address.getVisibility() == Visibility.PUBLIC
+                                                    ? VisibilityConstants.PUBLIC
+                                                    : VisibilityConstants.HIDE);
+                                }
                             }
                         }
                     }
@@ -931,7 +1034,7 @@ public class OrcidPreferencesUtils
                 if (mapMetadata.containsKey("keywords"))
                 {
                     Keywords keywords = orcidProfile.getKeywords();
-                    if (keywords != null)
+                    if (keywords != null && keywords.getKeyword() != null && keywords.getKeyword().size() > 0 && checkSyncAllowed(crisObject, mapMetadata.get("keywords"), propsToReplace))
                     {
                         for (KeywordCtype key : keywords.getKeyword())
                         {
@@ -948,7 +1051,7 @@ public class OrcidPreferencesUtils
                 if (mapMetadata.containsKey("researcher-urls"))
                 {
                     ResearcherUrls urls = orcidProfile.getResearcherUrls();
-                    if (urls != null)
+                    if (urls != null && urls.getResearcherUrl() != null && urls.getResearcherUrl().size() > 0 && checkSyncAllowed(crisObject, mapMetadata.get("researcher-urls"), propsToReplace))
                     {
                         for (ResearcherUrlCtype url : urls.getResearcherUrl())
                         {
@@ -969,7 +1072,8 @@ public class OrcidPreferencesUtils
                     for (ExternalId eid : eids.getExternalIdentifier())
                     {
                         if (mapMetadata.containsKey("external-identifier-"
-                                + eid.getExternalIdValue()))
+                                + eid.getExternalIdValue()) && checkSyncAllowed(crisObject, mapMetadata.get("external-identifier-"
+                                        + eid.getExternalIdValue()), propsToReplace))
                         {
                             ResearcherPageUtils.buildTextValue(crisObject,
                                     eid.getExternalIdType(),
@@ -981,11 +1085,32 @@ public class OrcidPreferencesUtils
                         }
                     }
                 }
-            }
-            return true;
+
+        		// should we register a webhook?
+				if ("all".equalsIgnoreCase(
+						ConfigurationManager.getProperty("authentication-oauth", "orcid-webhook"))) {
+        			registerOrcidWebHook(crisObject);
+        		}
+                return true;
+            } // end orcidProfile != null
         }
         return false;
-
+    }
+    
+    private static boolean hasBeenImportedInThisThread(ResearcherPage crisObject) {
+    	return importedORCIDs.get().contains(crisObject.getCrisID());
+    }
+    
+    private static boolean checkSyncAllowed(ResearcherPage crisObject, String pdefKey, List<String> propsToReplace) {
+		if (propsToReplace != null && (propsToReplace.contains(pdefKey) || propsToReplace.contains("*"))) {
+    		ResearcherPageUtils.cleanPropertyByPropertyDefinition(crisObject, pdefKey);
+    		return true;
+    	}
+    	List<RPProperty> listMetadata = crisObject.getAnagrafica4view().get(pdefKey);
+		if (listMetadata == null || listMetadata.size() == 0) {
+			return true;
+		}
+    	return false;
     }
 
     public static void printXML(Object jaxbSerializableObject)
@@ -1014,4 +1139,103 @@ public class OrcidPreferencesUtils
         }
     }
 
+    public boolean prepareOrcidQueueByNested(ACrisNestedObject crisNestedObject)
+    {
+        if (crisNestedObject.getParent() instanceof ResearcherPage)
+        {
+            String shortname = crisNestedObject.getTypo().getShortName();
+            ResearcherPage rp = (ResearcherPage) crisNestedObject.getParent();
+            if (hasBeenImportedInThisThread(rp)) {
+            	return false;
+            }
+            List<RPPropertiesDefinition> metadataDefinitions = getApplicationService()
+                    .likePropertiesDefinitionsByShortName(
+                            RPPropertiesDefinition.class,
+                            PREFIX_ORCID_PROFILE_PREF);
+            for (RPPropertiesDefinition rppd : metadataDefinitions)
+            {
+                String metadataShortnameINTERNAL = rppd.getShortName()
+                        .replaceFirst(PREFIX_ORCID_PROFILE_PREF, "");
+                List<RPProperty> propsRps = rp.getAnagrafica4view()
+                        .get(rppd.getShortName());
+                for (RPProperty prop : propsRps)
+                {
+                    BooleanValue booleanValue = (BooleanValue) (prop
+                            .getValue());
+                    if (booleanValue.getObject())
+                    {
+                        if (metadataShortnameINTERNAL.endsWith(shortname))
+                        {
+                            prepareOrcidQueue(rp.getCrisID(), rp);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+	public static boolean registerOrcidWebHook(ResearcherPage rp) {
+		String orcid = ResearcherPageUtils.getStringValue(rp, "orcid");
+		if (orcid != null && OrcidService.getOrcid().registerWebHook(orcid)) {
+			// clear previous flags
+			List<RPProperty> rppp = rp.getAnagrafica4view().get(RPPDEF_ORCID_WEBHOOK);
+			if (rppp != null && !rppp.isEmpty()) {
+				for (RPProperty rpppp : rppp) {
+					rp.removeProprieta(rpppp);
+				}
+			}
+			ResearcherPageUtils.buildGenericValue(rp, Boolean.TRUE, RPPDEF_ORCID_WEBHOOK, VisibilityConstants.PUBLIC);
+			return true;
+		}
+		return false;
+	}
+
+	public static boolean unregisterOrcidWebHook(ResearcherPage rp) {
+		String orcid = ResearcherPageUtils.getStringValue(rp, "orcid");
+		if (orcid != null && OrcidService.getOrcid().unregisterWebHook(orcid)) {
+			// clear previous flags
+			List<RPProperty> rppp = rp.getAnagrafica4view().get(RPPDEF_ORCID_WEBHOOK);
+			if (rppp != null && !rppp.isEmpty()) {
+				for (RPProperty rpppp : rppp) {
+					rp.removeProprieta(rpppp);
+				}
+			}
+			ResearcherPageUtils.buildGenericValue(rp, Boolean.FALSE, RPPDEF_ORCID_WEBHOOK, VisibilityConstants.PUBLIC);
+			return true;
+		}
+		return false;
+	}
+
+	public static void setTokens(ResearcherPage rp, String token) {
+		String scopeMetadata = ConfigurationManager.getProperty("authentication-oauth",
+				"application-client-scope");
+		if (StringUtils.isNotBlank(scopeMetadata)) {
+			for (String scopeConfigurated : OAuthUtils.decodeScopes(scopeMetadata)) {
+				// clear all token
+				List<RPProperty> rppp = rp.getAnagrafica4view()
+						.get("system-orcid-token" + scopeConfigurated.replace("/", "-"));
+				if (rppp != null && !rppp.isEmpty()) {
+					for (RPProperty rpppp : rppp) {
+						rp.removeProprieta(rpppp);
+					}
+				}
+			}
+		}
+		// rebuild token
+		if (StringUtils.isNotBlank(scopeMetadata) && StringUtils.isNotBlank(token)) {
+			for (String scopeConfigurated : OAuthUtils.decodeScopes(scopeMetadata)) {
+				ResearcherPageUtils.buildTextValue(rp, token,
+						"system-orcid-token" + scopeConfigurated.replace("/", "-"));
+			}
+		}
+	}
+	
+	//UTILITY METHODS
+	public static String getTokenReleasedForSync(ResearcherPage researcher,
+	        String tokenName)
+	{
+	    return ResearcherPageUtils.getStringValue(researcher, tokenName);
+	}
 }
